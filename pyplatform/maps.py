@@ -1,78 +1,43 @@
+import struct
+
 import pygame.draw
 from pyplatform import json, grounds, miscellaneous
-import game
-# import time
+from pyplatform.database.db import Database
 
 
 class Maps:
 
-    def __init__(self, game = None):
-        self.game = game
-
     def get_map(self, code):
         if isinstance(code, int) and code > 0:
             sql = "SELECT * FROM `maps` WHERE `id` = %s;"
-            mapdb = game.Game.database.select(sql, (code,))[0]
+            mapdb = Database.wake_up().select(sql, (code,))[0]
             if mapdb is not None:
                 return Map(mapdb["id"], mapdb["author"], mapdb["xml"], mapdb["updated_at"], mapdb["created_at"])
         return None
 
     def get_random_map(self):
         sql = "SELECT * FROM `maps` ORDER BY RAND() LIMIT 0, 1;"
-        mapdb = game.Game.database.select(sql)[0]
+        mapdb = Database.wake_up().select(sql)[0]
         if mapdb is not None:
             return Map(mapdb["id"], mapdb["author"], mapdb["xml"], mapdb["updated_at"], mapdb["created_at"])
         return None
 
-    '''
-    def addMap(self, author, mapData):
-        if isinstance(author, str) and isinstance(mapData, str):
-            timestamp = time.time()
-            sql = "INSERT INTO `maps` (author, map, updated_at, created_at) VALUES (%s, %s, %s, %s);"
-            values = (author, mapData, timestamp, timestamp)
-            self.game.database.insert(sql, values)
-            self.game.database.commit()
-            print("Une nouvelle map a été ajoutée !")
+    def show_map(self, map, screen):
+        self.show_map_grounds(map, screen)
+        self.show_map_holes(map, screen)
+        self.show_map_checkpoints(map, screen)
 
-    def nextMap(self):
-        if self.game.editor.isOpened:
-            self.reloadCheckpoints()
-            if self.game.player.can_spawn:
-                self.game.player.respawn()
-        else:
-            self.loadMap(self.getRandomMap())
-    '''
+    def show_map_grounds(self, map, screen):
+        map.grounds.show(screen)
 
-    def show_map(self, map):
-        self.show_map_grounds(map)
-        self.show_map_holes(map)
-        self.show_map_checkpoints(map)
-
-    def show_map_grounds(self, map):
-        map.grounds.show(self.game.screen)
-
-    def show_map_holes(self, map):
+    def show_map_holes(self, map, screen):
         for hole in map.holes:
-            pygame.draw.rect(self.game.screen, miscellaneous.hex_to_list(hole.color), hole.rect)
+            pygame.draw.rect(screen, miscellaneous.hex_to_tuple(hole.color), hole.rect)
 
-    def show_map_checkpoints(self, map):
+    def show_map_checkpoints(self, map, screen):
         for checkpoint in map.checkpoints:
             color = checkpoint.color
-            if self.game.editor.isOpened and checkpoint.state:
-                color = "ACFA58"
-            if not checkpoint.state or self.game.editor.isOpened:
-                pygame.draw.rect(self.game.screen, miscellaneous.hex_to_list(color), checkpoint.rect)
-
-    '''
-    def resetCurrentMap(self):
-        self.currentMap = Map(self.game)
-
-    def reloadCheckpoints(self):
-        for checkpoint in self.currentMap.checkpoints:
-            if checkpoint.state == True:
-                self.currentMap.checkpointsLeft += 1
-            checkpoint.state = False
-    '''
+            pygame.draw.rect(screen, miscellaneous.hex_to_tuple(color), checkpoint.rect)
 
 
 class Map:
@@ -105,7 +70,7 @@ class Map:
             self.add_checkpoint(checkpoint.x, checkpoint.y)
 
     def show_spawn(self, screen):
-        pygame.draw.rect(screen, miscellaneous.hex_to_list(Spawn.properties["color"]), (self.spawn['x'], self.spawn['y'], Spawn.properties["height"], Spawn.properties["width"]))
+        pygame.draw.rect(screen, miscellaneous.hex_to_tuple(Spawn.properties["color"]), (self.spawn['x'], self.spawn['y'], Spawn.properties["height"], Spawn.properties["width"]))
 
     def move_spawn(self, x, y):
         self.spawn["x"], self.spawn["y"] = x, y
@@ -144,8 +109,10 @@ class Map:
                                 self.grounds.ground_list.remove(ground)
                                 break
 
-    def __str__(self):
-        return str(self.id) + "\x1F" + str(self.author) + "\x1F" + str(self.xml) + "\x1F" + str(self.updated_at) + "\x1F" + str(self.created_at)
+    def __bytes__(self):
+        bytes_author = bytes(self.author, "utf-8")
+        bytes_xml = bytes(self.xml, "utf-8")
+        return struct.pack("!II%dsI%dsII" % (len(bytes_author), len(bytes_xml)), self.id, len(bytes_author), bytes_author, len(bytes_xml), bytes_xml, self.updated_at, self.created_at)
 
 
 class Spawn:

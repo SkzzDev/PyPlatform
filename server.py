@@ -1,41 +1,52 @@
 import socket
-from _thread import *
+import struct
 import pyplatform
 
 
-class PyPlatformClientHandler:
-    def __init__(self, id, server, socket):
-        self.id = id
+class PyPlatformClientHandler(pyplatform.protocol.PyPlatformProtocol):
+    def __init__(self, server, socket):
+        # Super
+        self.network = pyplatform.network.PyPlatformNetwork(self)
+        self.network.assign_socket(socket)
+        super().__init__(self.network)
+
+        # Main variables
         self.server = server
-        self.socket = socket
         self.player = pyplatform.player.Player()
         self.room = None
 
-    def send_data(self, str_data):
-        # print("[ThreadClient | " + self.player.get_id_and_room_name() + " | Info] Sending data: " + str(str_data))
-        self.socket.send(str.encode(str_data))
+        # Assign player an id
+        self.player.id = server.generate_player_id()
+        self.send_data("\x1C", "\x01", struct.pack("!I", self.player.id))  # Set player id
 
-    def received_data(self, decoded_data):
-        # print("[ThreadClient | " + self.player.get_id_and_room_name() + " | Info] Data received: " + decoded_data)
-        args = decoded_data.split(" ")
-        if args[0] == "get-room-players":
-            players = self.server.get_room_player_list(self.room.name)
-            self.send_data("set-room-players " + players)
-        elif args[0] == "enter-room":
-            room_name = args[1]
-            self.server.player_enter_room(self, room_name)
-        elif args[0] == "player-died":
-            self.player.is_spawned = False
-            self.server.check_should_change_map(self.room.name)
-        elif args[0] == "player-entered-hole":
-            self.player.is_spawned = False
-        elif args[0] == "update-player":
-            id, x, y, color, is_spawned = args[1].split("\x1F")
-            self.player.id = int(id)
-            self.player.x = float(x)
-            self.player.y = float(y)
-            self.player.color = color
-            self.player.is_spawned = (is_spawned == "True")
+    def connection_made(self):
+        print("[PyPlatformClientHandler | Info] Connection to network made !")
+
+    def connection_lost(self, exception=None):
+        if exception is not None:
+            print("[PyPlatformClientHandler | Error] Connection to network lost: " + str(exception))
+        self.server.client_disconnected(self)
+
+    def parse_data(self, category, event, content):
+        if category == "\x1A":  # Message
+            pass
+        elif category == "\x1B":  # Room
+            if event == "\x01":  # Player enter room
+                room_name_len = int(struct.unpack("!I", content[:4])[0])
+                room_name = struct.unpack("!%ds" % room_name_len, content[4:])[0].decode("utf-8")
+                self.server.player_enter_room(self, room_name)
+            elif event == "\x02":  # Get room players data
+                players = self.server.get_room_player_data(self.room.name)  # Set room players data
+                self.send_data("\x1B", "\x01", players)
+        elif category == "\x1C":  # Player
+            if event == "\x01":  # Player died
+                self.player.is_spawned = False
+                self.server.check_should_change_map(self.room.name)
+            elif event == "\x02":  # Player entered hole
+                self.player.is_spawned = False
+            elif event == "\x03":  # Updating player data
+                self.player.id, self.player.x, self.player.y, r, g, b, self.player.is_spawned = struct.unpack("!IffBBB?", content)
+                self.player.color = pyplatform.miscellaneous.tuple_to_hex((r, g, b))
 
 
 class PyPlatformRoomHandler(object):
@@ -57,77 +68,82 @@ class PyPlatformRoomHandler(object):
             client.player.room_name = ""
             client.room = None
 
-    def send_all_data(self, raw_data):
+    def send_all_data(self, category, event, packet_data=None):
         for i, client in self.clients.items():
-            client.send_data(raw_data)
+            client.send_data(category, event, packet_data)
 
     def __len__(self):
         return len(self.clients)
 
 
-class PyPlatformServer:
+class PyPlatformServer():
+
     def __init__(self, host, port):
         self.host = host
         self.port = port
         self.socket = None
-        self.db = pyplatform.database.db.Database()
         self.maps = pyplatform.maps.Maps()
 
+        self.current_client_id = 0
         self.rooms = {}
 
     def init_socket(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+    def generate_player_id(self):
+        self.current_client_id += 1
+        return self.current_client_id
+
     def player_enter_room(self, client, room_name):
         if room_name in self.rooms:
             # Room with people already inside
             self.rooms[room_name].client_enter_room(client)
-            client.send_data("set-map " + str(self.rooms[room_name].current_map))
-            client.send_data("spawn")
+            client.send_data("\x1B", "\x02", bytes(self.rooms[room_name].current_map))  # Set room map
+            client.send_data("\x1C", "\x02")  # Respawn
         else:
             # Empty room, create a new one
             self.rooms[room_name] = PyPlatformRoomHandler(self, room_name)
             self.rooms[room_name].client_enter_room(client)
             map = self.maps.get_random_map()
-            if map != None:
+            if map is not None:
                 self.rooms[room_name].current_map = map
-                client.send_data("set-map " + str(map))
-                client.send_data("spawn")
+                client.send_data("\x1B", "\x02", bytes(map))  # Set room map
+                client.send_data("\x1C", "\x02")  # Respawn
+                self.rooms[room_name].send_all_data("\x1B", "\x04", bytes(client.player))  # A player entered the room
 
     def player_exit_room(self, client):
         client_room = client.room
-        if client.room != None:  # If player is inside a room
+        if client.room is not None:  # If player is inside a room
             self.rooms[client_room.name].client_exit_room(client)
             client.player.is_spawned = False
 
-    def get_room_player_list(self, room_name):
-        buffer = ""
+    def get_room_player_data(self, room_name):
+        buffer = b""
         if room_name in self.rooms:
+            buffer = struct.pack("!h", len(self.rooms[room_name].clients))
             for i, client in self.rooms[room_name].clients.items():
-                buffer += str(client.player) + "\x1E"
-            if len(buffer) > 0:
-                buffer = buffer[:-1]
+                buffer += bytes(client.player)
         return buffer
 
     def client_disconnected(self, client):
         client_room = client.room
         client_was_spawned = client.player.is_spawned
-        if client_room != None:  # If player is inside a room
+        if client_room is not None:  # If player is inside a room
             self.player_exit_room(client)
             if len(self.rooms[client_room.name]) == 0:  # If nobody left in the room
                 del self.rooms[client_room.name]
             else:  # If there is still people inside the room
-                client_room.send_all_data("player-disconnected " + str(client.player.id))
+                # client_room.send_all_data("player-disconnected " + str(client.player.id))
                 if client_was_spawned:
                     self.check_should_change_map(client_room.name)
 
     def check_should_change_map(self, room_name):
-       if self.count_players_alive_room(room_name) == 0:  # If nobody is still alive in the room
+        if self.count_players_alive_room(room_name) == 0:  # If nobody is still alive in the room
             map = self.maps.get_random_map()
-            if map != None:  # If we could get a map
+            if map is not None:  # If we could get a map
                 self.rooms[room_name].current_map = map
-                self.rooms[room_name].send_all_data("set-map " + str(map))
-                self.rooms[room_name].send_all_data("spawn")
+                # self.rooms[room_name].send_all_data("set-map " + str(map))
+                self.rooms[room_name].send_all_data("\x1C", "\x02")  # Respawn
 
     def count_players_room(self, room_name, alive = False):
         if alive:
@@ -143,47 +159,21 @@ class PyPlatformServer:
         return self.count_players_room(room_name, True)
 
 
-def thread_client(client):
-    global server
-    client.player.id = client.id
-    client.send_data("set-player-id " + str(client.id))
-
-    while True:
-        try:
-            client.received_data(client.socket.recv(1024*4).decode())
-        except Exception as e:
-            print("[ThreadClient | " + str(address) + " | Info] Lost connection (" + str(e) + ")")
-            break
-
-    if client.player.room_name != "":
-        server.client_disconnected(client)
-
-    print("[ThreadClient | " + str(address) + " | Info] Player disconnected.")
-    client.socket.close()
-
-
 try:
+    print("[Server | Info] Starting server...")
+
     server = PyPlatformServer("localhost", 5555)
     server.init_socket()
-
     server.socket.bind((server.host, server.port))
-
     server.socket.listen()
-    print("[Server | Info] Server running: waiting for connections.")
 
-    current_client_id = 1
+    print("[Server | Info] Server is running.")
 
     while True:
-        socket, address = server.socket.accept()
-        print("[Server | Info] Player just connected (" + str(address) + ")")
-
-        client = PyPlatformClientHandler(current_client_id, server, socket)
-
-        start_new_thread(thread_client, (client, ))
-
-        current_client_id += 1
-
         print("[Server | Info] Waiting for new connections...")
 
-except socket.error as e:
+        socket, address = server.socket.accept()
+        client = PyPlatformClientHandler(server, socket)
+
+except Exception as e:
     print("[Server | Error] " + str(e))

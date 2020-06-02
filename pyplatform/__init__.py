@@ -5,3 +5,5 @@ import pyplatform.maps
 import pyplatform.miscellaneous
 import pyplatform.physics
 import pyplatform.player
+import pyplatform.protocol
+import pyplatform.network

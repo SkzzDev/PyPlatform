@@ -1,39 +1,34 @@
 import pyplatform
 import pygame
-import socket
 import os, sys
-from _thread import *
+import struct
+import socket
 
-
-class PyPlatformClientNetwork:
-    def __init__(self, host, port):
+class PyPlatformClientNetwork(pyplatform.network.PyPlatformNetwork):
+    def __init__(self, host, port, protocol):
+        super().__init__(protocol)
         self.host = host
         self.port = port
-        self.socket = None
-        self.could_connect = False
 
     def init_socket(self):
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     def connect(self):
         try:
+            self.init_socket()
             self.socket.connect((self.host, self.port))
-            self.could_connect = True
+            self.connection_made()
         except Exception as e:
-            print(e)
-
-    def send(self, data):
-        try:
-            self.socket.send(str.encode(data))
-        except Exception as e:
-            print(e)
+            raise e
 
 
-class Game:
-
-    database = pyplatform.database.db.Database()
+class Game(pyplatform.protocol.PyPlatformProtocol):
 
     def __init__(self):
+        # Super
+        self.network = PyPlatformClientNetwork("localhost", 5555, self)
+        super().__init__(self.network)
+
         # Config variables
         self.size = {'w': 1366, 'h': 768}
         self.background = "717B9C"
@@ -42,42 +37,82 @@ class Game:
         self.stopped = False
 
         # Helpers
-        self.network = PyPlatformClientNetwork("localhost", 5555)
         self.physics = pyplatform.physics.Physics(self)
         self.editor = pyplatform.editor.Editor(self)
-        self.maps = pyplatform.maps.Maps(self)
+        self.maps = pyplatform.maps.Maps()
 
         # Main variables
         self.player = pyplatform.player.PhysicPlayer()
         self.players = {}
         self.current_map = None
 
-    def thread_receive_data(self):
-        while True:
-            try:
-                received_data = self.network.socket.recv(1024*4).decode()
-                self.received_data(received_data)
-                print(received_data)
-            except Exception as e:
-                print("[ThreadClient | " + self.player.get_id_and_room_name() + " | Info] Lost connection (" + str(e) + ")")
-                break
+    def connect_to_network(self):
+        try:
+            self.network.connect()
+        except Exception as e:
+            print("[PyPlatformProtocol | Error] Couldn't connect to network: " + str(e))
 
-        print("[ThreadClient | " + self.player.get_id_and_room_name() + " | Info] Closing Game")
-        self.network.socket.close()
+    def connection_made(self):
+        print("[Game | Info] Connection to network made !")
+
+    def connection_lost(self, exception=None):
         self.stopped = True
+        if exception is not None:
+            print("[Game | Error] Connection to network lost: " + str(exception))
+
+    def parse_data(self, category, event, content):
+        if category == "\x1A":  # Message
+            if event == "\x01":  # Received normal message
+                message_len = struct.unpack("!I", content[:4])
+                message = struct.unpack("!%ds" % message_len, content[4:])[0]
+                print(message.decode("utf-8"))
+        elif category == "\x1B":  # Room
+            if event == "\x01":  # Set room players data
+                players_count = struct.unpack("!h", content[:2])[0]
+                content = content[2:]
+                for i in range(players_count):
+                    player_id = struct.unpack("!I", content[:4])[0]
+                    if player_id in self.players:  # If a new player come, its entering packet could arrive later than this one
+                        self.players[player_id].update(content[4:12])
+                    content = content[16:]
+            elif event == "\x02":  # Set room map
+                # Format: "!II%dsI%dsII"
+                id = struct.unpack("!I", content[:4])[0]
+                content = content[4:]
+                author_len = struct.unpack("!I", content[:4])[0]
+                content = content[4:]
+                author = struct.unpack("!%ds" % author_len, content[:author_len])
+                content = content[author_len:]
+                xml_len = struct.unpack("!I", content[:4])[0]
+                content = content[4:]
+                xml = struct.unpack("!%ds" % xml_len, content[:xml_len])[0]
+                content = content[xml_len:]
+                updated_at, created_at = struct.unpack("!II", content[:8])
+                self.current_map = pyplatform.maps.Map(id, author, xml, updated_at, created_at)
+            elif event == "\x03":  # A player left the room
+                id = struct.unpack("!I", content)[0]
+                if id in self.players:
+                    del self.players[id]
+            elif event == "\x04":  # A player entered the room
+                player_id = struct.unpack("!I", content[:4])
+                if player_id not in self.players:
+                    self.players[player_id] = pyplatform.player.Player(content)
+        elif category == "\x1C":  # Player
+            if event == "\x01":  # Set player id
+                self.player.id = int(struct.unpack("!I", content)[0])
+            elif event == "\x02":  # Spawn / Respawn
+                self.player.respawn(self.current_map)
+        else:
+            print("[Game | Error] Unkown category « " + repr(category) + " »")
+
+    def send_enter_room(self, room_name):
+        if room_name != "":
+            self.player.room_name = room_name
+            bytes_room_name = bytes(room_name, "utf-8")
+            self.send_data("\x1B", "\x01", struct.pack("!I%ds" % len(bytes_room_name), len(bytes_room_name), bytes_room_name))
+
 
     def run(self):
-
-        print(">>> Initialisation réseau ...")
-
-        self.network.init_socket()
-        self.network.connect()
-
-        if not self.network.could_connect:
-            print(">>> Connexion échouée ...")
-            return
-
-        start_new_thread(self.thread_receive_data, ())
 
         print(">>> Initialisation du jeu ...")
 
@@ -85,22 +120,30 @@ class Game:
 
         os.environ['SDL_VIDEO_WINDOW_POS'] = "0,30"
         if sys.platform.startswith('win'):
-            os.system('title PyPlatformNetwork')
+            os.system('title PyPlatform')
         else:
             pass
 
         pygame.init()
-        clock = pygame.time.Clock()
+
+        print(">>> Initialisation réseau ...")
+
+        self.connect_to_network()
+
+        if not self.is_connected():
+            return
 
         print(">>> En cours d'exécution ...")
 
+        clock = pygame.time.Clock()
         self.stopped = False
 
-        self.player.room_name = "1"
-        self.send_data("enter-room 1")
+        self.send_enter_room("1")
+
+        self.stopped = False
 
         while not self.stopped:
-            self.send_data("get-room-players")
+            self.send_data("\x1B", "\x02")  # Get room players data
 
             # Assignation des frames/sec
             pyplatform.physics.Physics.dtf = clock.tick(self.fps) / 1000
@@ -158,11 +201,11 @@ class Game:
                     # editor.toggleEditor()
                     pass
 
-            self.screen.fill(pyplatform.miscellaneous.hex_to_list(self.background))
+            self.screen.fill(pyplatform.miscellaneous.hex_to_tuple(self.background))
 
             # Affichage des sols
             if isinstance(self.current_map, pyplatform.maps.Map):
-                self.maps.show_map(self.current_map)
+                self.maps.show_map(self.current_map, self.screen)
 
             if self.player.is_spawned:  # Si le joueur est spawn
 
@@ -174,7 +217,7 @@ class Game:
                 self.player.check_holes_collision(self)
                 self.player.check_checkpoints_collision(self)
 
-                self.send_data("update-player " + str(self.player))
+                self.send_data("\x1C", "\x03", bytes(self.player))
 
                 self.player.draw_sprite(self.screen)
 
@@ -189,39 +232,3 @@ class Game:
             pygame.display.update()
 
         # Fin self.stop
-
-    def send_data(self, raw_data):
-        raw_str_data = str(raw_data)
-        # print("[ThreadClient | " + self.player.get_id_and_room_name() + " | Info] Sending data: " + raw_str_data)
-        self.network.socket.send(str.encode(raw_str_data))
-
-    def received_data(self, decoded_data):
-        # print("[ThreadClient | " + self.player.get_id_and_room_name() + " | Info] Data received (" + str(len(decoded_data)) + ") : " + decoded_data)
-        args = decoded_data.split(" ")
-        if args[0] == "set-player-id":
-            self.player.id = int(args[1])
-        elif args[0] == "set-room-players":
-            players = decoded_data[len("set-room-players") + 1:].split("\x1E")
-            for i, player in enumerate(players):
-                id, x, y, color, is_spawned = player.split("\x1F")
-                id = int(id)
-                if id not in self.players:
-                    self.players[id] = pyplatform.player.Player()
-                self.players[id].id = id
-                self.players[id].x = float(x)
-                self.players[id].y = float(y)
-                self.players[id].color = color
-                self.players[id].is_spawned = (is_spawned == "True")
-        elif args[0] == "set-map":
-            id, author, xml, updated_at, created_at = decoded_data[len("set-map") + 1:].split("\x1F")
-            self.current_map = pyplatform.maps.Map(id, author, xml, updated_at, created_at)
-        elif args[0] == "spawn" or args[0] == "respawn":
-            print("i want to spawn")
-            self.player.respawn(self.current_map)
-        elif args[0] == "player-disconnected":
-            id = int(args[1])
-            if id in self.players:
-                del self.players[id]
-        else:
-            pass
-            # print("data received : " + decoded_data)
