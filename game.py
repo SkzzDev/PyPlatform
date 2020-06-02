@@ -61,22 +61,23 @@ class Game(pyplatform.protocol.PyPlatformProtocol):
             print("[Game | Error] Connection to network lost: " + str(exception))
 
     def parse_data(self, category, event, content):
+        # print(category, event, content)
         if category == "\x1A":  # Message
             if event == "\x01":  # Received normal message
                 message_len = struct.unpack("!I", content[:4])
                 message = struct.unpack("!%ds" % message_len, content[4:])[0]
                 print(message.decode("utf-8"))
         elif category == "\x1B":  # Room
-            if event == "\x01":  # Set room players data
+            if event == "\x01":  # Update room players data
                 players_count = struct.unpack("!h", content[:2])[0]
                 content = content[2:]
                 for i in range(players_count):
                     player_id = struct.unpack("!I", content[:4])[0]
-                    if player_id in self.players:  # If a new player come, its entering packet could arrive later than this one
-                        self.players[player_id].update(content[4:12])
+                    if player_id in self.players:  # If a new player come, its entering packet could arrive later than this packet
+                        self.players[player_id].update(content[4:16])
                     content = content[16:]
             elif event == "\x02":  # Set room map
-                # Format: "!II%dsI%dsII"
+                # Initial format: "!II%dsI%dsII"
                 id = struct.unpack("!I", content[:4])[0]
                 content = content[4:]
                 author_len = struct.unpack("!I", content[:4])[0]
@@ -94,12 +95,18 @@ class Game(pyplatform.protocol.PyPlatformProtocol):
                 if id in self.players:
                     del self.players[id]
             elif event == "\x04":  # A player entered the room
-                player_id = struct.unpack("!I", content[:4])
+                player_id = struct.unpack("!I", content[:4])[0]
                 if player_id not in self.players:
                     self.players[player_id] = pyplatform.player.Player(content)
+            elif event == "\x05":  # Init room players ids (when entering a room)
+                players_number = struct.unpack("!h", content[:2])[0]
+                players_id = struct.unpack("!" + "I" * players_number, content[2:])
+                for i, player_id in enumerate(players_id):
+                    self.players[player_id] = pyplatform.player.Player()
+                    self.players[player_id].id = player_id
         elif category == "\x1C":  # Player
             if event == "\x01":  # Set player id
-                self.player.id = int(struct.unpack("!I", content)[0])
+                self.player.id = struct.unpack("!I", content)[0]
             elif event == "\x02":  # Spawn / Respawn
                 self.player.respawn(self.current_map)
         else:
@@ -110,7 +117,6 @@ class Game(pyplatform.protocol.PyPlatformProtocol):
             self.player.room_name = room_name
             bytes_room_name = bytes(room_name, "utf-8")
             self.send_data("\x1B", "\x01", struct.pack("!I%ds" % len(bytes_room_name), len(bytes_room_name), bytes_room_name))
-
 
     def run(self):
 
@@ -198,7 +204,6 @@ class Game(pyplatform.protocol.PyPlatformProtocol):
             # Enfoncement d'une touche du clavier
             if events_list["keyd"]:
                 if kpressed[pygame.K_e] and not kpressed[pygame.K_LCTRL]:
-                    # editor.toggleEditor()
                     pass
 
             self.screen.fill(pyplatform.miscellaneous.hex_to_tuple(self.background))

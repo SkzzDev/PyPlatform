@@ -32,12 +32,12 @@ class Maps:
 
     def show_map_holes(self, map, screen):
         for hole in map.holes:
-            pygame.draw.rect(screen, miscellaneous.hex_to_tuple(hole.color), hole.rect)
+            hole.show(screen)
 
     def show_map_checkpoints(self, map, screen):
         for checkpoint in map.checkpoints:
-            color = checkpoint.color
-            pygame.draw.rect(screen, miscellaneous.hex_to_tuple(color), checkpoint.rect)
+            if not checkpoint.captured:
+                checkpoint.show(screen)
 
 
 class Map:
@@ -96,7 +96,7 @@ class Map:
                 for checkpoint in reversed(self.checkpoints):
                     if checkpoint.rect.x <= x <= checkpoint.rect.x + checkpoint.rect.w:
                         if checkpoint.rect.y <= y <= checkpoint.rect.y + checkpoint.rect.h:
-                            if not checkpoint.state:
+                            if not checkpoint.captured:
                                 self.checkpointsLeft -= 1
                             self.checkpoints.remove(checkpoint)
                             found = True
@@ -136,6 +136,9 @@ class Hole:
         self.rect = pygame.Rect(x, y, Hole.properties["height"], Hole.properties["width"])
         self.color = Hole.properties["color"]
 
+    def show(self, screen):
+        pygame.draw.rect(screen, miscellaneous.hex_to_tuple(self.color), self.rect)
+
 
 class Checkpoint:
 
@@ -148,4 +151,7 @@ class Checkpoint:
     def __init__(self, x, y):
         self.rect = pygame.Rect(x, y, Checkpoint.properties["height"], Checkpoint.properties["width"])
         self.color = Checkpoint.properties["color"]
-        self.state = False
+        self.captured = False
+
+    def show(self, screen):
+        pygame.draw.rect(screen, miscellaneous.hex_to_tuple(self.color), self.rect)
